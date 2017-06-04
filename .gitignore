@@ -1,0 +1,4 @@
+gmlgrep
+*.bak
+*~
+.*.swp
