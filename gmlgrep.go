@@ -2,6 +2,8 @@ package main
 
 import (
     "fmt"
+    "os"
+    "bufio"
     goopt "github.com/droundy/goopt"
 )
 var Usage = "gmlgrep [OPTIONS...] PATTERN[...] [--] [FILES...]"
@@ -34,6 +36,25 @@ const RS_REGEX = "^$|^(=====*|-----*)$"
 var rs = goopt.StringWithLabel([]string{"-r", "--rs"}, RS_REGEX, "RS_REGEX",
     fmt.Sprintf("Input record separator. default: /%s/", RS_REGEX))
 
+
+
+func grep(regex []string, fileName string) bool {
+    found := false
+
+    file, e := os.Open(fileName)
+    checkError(e)
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        fmt.Print(scanner.Text())
+        fmt.Print("\n")
+    }
+    return found
+}
+
+
+
 func main() {
     goopt.Description = func() string {
         return "Example program for using the goopt flag library."
@@ -46,21 +67,45 @@ func main() {
         return usage
     }
     goopt.Parse(nil)
+
+    var regex []string;
+    var files []string;
     defer fmt.Print("\033[0m") // defer resetting the terminal to default colors
-    /*
-    switch *color {
-    case "default":
-    case "red": fmt.Print("\033[31m")
-    case "green": fmt.Print("\033[32m")
-    case "blue": fmt.Print("\033[34m")
-    default: panic("Unrecognized color!") // this should never happen!
-    }
-    for i:=0; i<*repetitions; i++ {
-        fmt.Println("Greetings,", *username)
-        log("You have", *repetitions, "children.")
-        for _,child := range *children {
-            fmt.Println("I also greet your child, whose name is", child)
+
+    fmt.Printf("os.Args: %s\n", os.Args)
+
+    i := 1;
+    for _, a := range os.Args[1:] {
+        if (a == "--") {
+            i++
+            break;
         }
+        // if an argument is a filename for existing one,
+        // assume that (and everything follows) as filename.
+        _, err := os.Stat(a)
+        if (err == nil) {
+            break;
+        }
+        regex = append(regex, a)
+        i++
     }
-    */
+
+    for _, a := range os.Args[i:] {
+        files = append(files, a)
+    }
+    fmt.Printf("regex: %s\n", regex)
+    fmt.Printf("files: %s\n", files)
+
+
+    for _, f := range files {
+        grep(regex, f)
+    }
+
+}
+
+func checkError(e error) {
+    if e != nil {
+        fmt.Println(e)
+        os.Exit(1)
+    }
 }
