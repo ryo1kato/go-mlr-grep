@@ -4,6 +4,7 @@ import (
     "fmt"
     "os"
     "bufio"
+    "regexp"
     goopt "github.com/droundy/goopt"
 )
 var Usage = "gmlgrep [OPTIONS...] PATTERN[...] [--] [FILES...]"
@@ -38,7 +39,7 @@ var rs = goopt.StringWithLabel([]string{"-r", "--rs"}, RS_REGEX, "RS_REGEX",
 
 
 
-func grep(regex []string, fileName string) bool {
+func grep(re *regexp.Regexp, fileName string) bool {
     found := false
 
     file, e := os.Open(fileName)
@@ -47,8 +48,11 @@ func grep(regex []string, fileName string) bool {
 
     scanner := bufio.NewScanner(file)
     for scanner.Scan() {
-        fmt.Print(scanner.Text())
-        fmt.Print("\n")
+        line := scanner.Text()
+        if re.MatchString(line) {
+            fmt.Print(scanner.Text())
+            fmt.Print("\n")
+        }
     }
     return found
 }
@@ -96,9 +100,10 @@ func main() {
     fmt.Printf("regex: %s\n", regex)
     fmt.Printf("files: %s\n", files)
 
+    re := regexp.MustCompile(regex[0])
 
     for _, f := range files {
-        grep(regex, f)
+        grep(re, f)
     }
 
 }
