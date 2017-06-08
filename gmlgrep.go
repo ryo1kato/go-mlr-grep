@@ -5,6 +5,7 @@ import (
     "os"
     "bufio"
     "regexp"
+    "strings"
     goopt "github.com/droundy/goopt"
 )
 var Usage = "gmlgrep [OPTIONS...] PATTERN[...] [--] [FILES...]"
@@ -37,6 +38,27 @@ const RS_REGEX = "^$|^(=====*|-----*)$"
 var rs = goopt.StringWithLabel([]string{"-r", "--rs"}, RS_REGEX, "RS_REGEX",
     fmt.Sprintf("Input record separator. default: /%s/", RS_REGEX))
 
+
+
+func fgrep(pattern string, fileName string) bool {
+    found := false
+
+    file, e := os.Open(fileName)
+    checkError(e)
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        line := scanner.Text()
+        // FIXME: a patch for standard string package is needed to export StringFInd()
+        if strings.StringFind(pattern, line) >= 0 {
+        //if strings.Index(line, pattern) >= 0 {
+            fmt.Print(scanner.Text())
+            fmt.Print("\n")
+        }
+    }
+    return found
+}
 
 
 func grep(re *regexp.Regexp, fileName string) bool {
@@ -100,10 +122,9 @@ func main() {
     fmt.Printf("regex: %s\n", regex)
     fmt.Printf("files: %s\n", files)
 
-    re := regexp.MustCompile(regex[0])
-
+    //re := regexp.MustCompile(regex[0])
     for _, f := range files {
-        grep(re, f)
+        fgrep(regex[0], f)
     }
 
 }
