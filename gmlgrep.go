@@ -3,9 +3,12 @@ package main
 import (
     "fmt"
     "os"
-    "bufio"
-    "regexp"
-    "strings"
+    "io"
+    "bytes"
+    "errors"
+    //"bufio"
+    //"regexp"
+    //"strings"
     goopt "github.com/droundy/goopt"
 )
 var Usage = "gmlgrep [OPTIONS...] PATTERN[...] [--] [FILES...]"
@@ -38,48 +41,120 @@ const RS_REGEX = "^$|^(=====*|-----*)$"
 var rs = goopt.StringWithLabel([]string{"-r", "--rs"}, RS_REGEX, "RS_REGEX",
     fmt.Sprintf("Input record separator. default: /%s/", RS_REGEX))
 
+//////////////////////////////////////////////////////////////////////////////
+//maxBufferSize = 1 * 1024 * 1024
 
 
-func fgrep(pattern string, fileName string) bool {
-    found := false
 
-    file, e := os.Open(fileName)
-    checkError(e)
-    defer file.Close()
+//////////////////////////////////////////////////////////////////////////////
 
-    scanner := bufio.NewScanner(file)
-    for scanner.Scan() {
-        line := scanner.Text()
-        // FIXME: a patch for standard string package is needed to export StringFInd()
-        if strings.StringFind(pattern, line) >= 0 {
-        //if strings.Index(line, pattern) >= 0 {
-            fmt.Print(scanner.Text())
-            fmt.Print("\n")
+func checkError(e error) {
+    if e != nil {
+        fmt.Fprintf(os.Stdout, "ERROR: %d\n", e)
+        os.Exit(1)
+    }
+}
+
+func debug(format string, args ...interface{}) {
+    fmt.Fprintf(os.Stderr, ">> DEBUG: " + format, args...)
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Find-pattern-first algorithm
+
+type PatternFirstFinder struct {
+    found bool;
+    patFinder   func(data []byte) (int, int)
+    rsFinder    func(data []byte) (int, int)
+    rsRevFinder func(data []byte) (int, int)
+}
+
+func NewPatternFirstFinder(pat, rs string) *PatternFirstFinder{
+    //compile regex and set MLRFinder fields
+    s := new(PatternFirstFinder)
+    s.found = false
+    s.patFinder   = func(d []byte) (int, int) { return bytes.Index(d, []byte(pat)), len(pat) }
+    s.rsFinder    = func(d []byte) (int, int) { return bytes.Index(d, []byte(rs)), len(rs) }
+    s.rsRevFinder = func(d []byte) (int, int) {
+        if len(d) < len (rs) {
+            return -1, 0
+        }
+        for pos := 0; pos < len(d); pos++ {
+            if bytes.HasSuffix(d[0:len(d)-pos], []byte(rs)) {
+                return pos, len(rs)
+            }
+        }
+        return -1, 0
+    }
+    return s
+}
+
+func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advance int, token []byte, err error) {
+    s.found = false
+
+    if atEOF && len(data) == 0 {
+        return 0, nil, nil
+    }
+
+    if (tooLong) {
+        rsPos, rsSize := s.rsRevFinder(data)
+        if rsPos < 0 {
+            return 0, nil, errors.New("record is too long and didn't fit into a buffer")
+        } else {
+            //return non-match records with s.found set to false
+            return len(data) - rsPos + rsSize, data[len(data):len(data)], nil
         }
     }
-    return found
+
+    loc, size := s.patFinder(data)
+    if loc < 0 {
+        return 0, nil, nil //request more data.
+    }
+    debug("Split(): patFinder() loc=%d, size=%d, '%s'\n", loc, size, data[loc:loc+size])
+    preLoc := 0
+    preSize := 0
+    if loc != 0 {
+        var lastRsOffset int
+        lastRsOffset, preSize = s.rsRevFinder(data[:loc])
+        if lastRsOffset > 0 {
+            preLoc = loc - lastRsOffset - preSize
+        }
+    }
+    debug("rs='%s'\n", data[preLoc:preLoc+preSize])
+
+    postLoc, postSize := s.rsFinder(data[loc+size:])
+    //debug(">>>%s<<<\n", data[loc+size:])
+    if (postLoc < 0){
+        return 0, nil, nil
+    }
+    debug("postLoc, postSize = %d, %d\n", postLoc, postSize)
+    debug("post string: %s\n", data[loc+size+postLoc:loc+size+postLoc+postSize])
+
+    recBegin := preLoc+preSize
+    recEnd   := loc+size+postLoc+postSize
+    rec      := data[recBegin:recEnd]
+    debug("RETURN: %d, %s", recEnd, rec)
+    return recEnd, rec, nil
 }
 
 
-func grep(re *regexp.Regexp, fileName string) bool {
-    found := false
+func mlrgrep(pat string, rs string, r io.Reader) {
+    scanner := NewScanner(r)
+    splitter := NewPatternFirstFinder(pat, rs)
 
-    file, e := os.Open(fileName)
-    checkError(e)
-    defer file.Close()
+    scanner.Split(splitter.Split)
 
-    scanner := bufio.NewScanner(file)
     for scanner.Scan() {
-        line := scanner.Text()
-        if re.MatchString(line) {
-            fmt.Print(scanner.Text())
-            fmt.Print("\n")
+        line := scanner.Bytes()
+        if splitter.found {
+            //fmt.Fprint(os.Stdout, line)
+            fmt.Fprintf(os.Stdout, "OUT: %s", line)
         }
     }
-    return found
 }
 
 
+//////////////////////////////////////////////////////////////////////////////
 
 func main() {
     goopt.Description = func() string {
@@ -98,10 +173,11 @@ func main() {
     var files []string;
     defer fmt.Print("\033[0m") // defer resetting the terminal to default colors
 
-    fmt.Printf("os.Args: %s\n", os.Args)
+    debug("os.Args: %s\n", os.Args)
+    debug("rs=%s\n", *rs)
 
-    i := 1;
-    for _, a := range os.Args[1:] {
+    i := 0;
+    for _, a := range goopt.Args[i:] {
         if (a == "--") {
             i++
             break;
@@ -116,22 +192,18 @@ func main() {
         i++
     }
 
-    for _, a := range os.Args[i:] {
+    for _, a := range goopt.Args[i:] {
         files = append(files, a)
     }
-    fmt.Printf("regex: %s\n", regex)
-    fmt.Printf("files: %s\n", files)
+    debug("regex: %s\n", regex)
+    debug("files: %s\n", files)
 
     //re := regexp.MustCompile(regex[0])
     for _, f := range files {
-        fgrep(regex[0], f)
-    }
-
-}
-
-func checkError(e error) {
-    if e != nil {
-        fmt.Println(e)
-        os.Exit(1)
+        //fgrep(regex[0], f)
+        file, e := os.Open(f)
+        checkError(e)
+        defer file.Close()
+        mlrgrep(regex[0], *rs, file)
     }
 }
