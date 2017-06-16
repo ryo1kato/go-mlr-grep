@@ -6,9 +6,9 @@ import (
     "io"
     "bytes"
     "errors"
-    //"bufio"
+    "bufio"
     //"regexp"
-    //"strings"
+    "strings"
     goopt "github.com/droundy/goopt"
 )
 var Usage = "gmlgrep [OPTIONS...] PATTERN[...] [--] [FILES...]"
@@ -59,6 +59,15 @@ func debug(format string, args ...interface{}) {
     fmt.Fprintf(os.Stderr, ">> DEBUG: " + format, args...)
 }
 
+//escape newline for debug output.
+//func esc(s string) {
+//    strings.Replace(s, "\n", "\\n", -1)
+//}
+
+func esc(b []byte) string {
+    return strings.Replace(string(b), "\n", "\\n", -1)
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // Find-pattern-first algorithm
 
@@ -91,12 +100,15 @@ func NewPatternFirstFinder(pat, rs string) *PatternFirstFinder{
 
 func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advance int, token []byte, err error) {
     s.found = false
+    debug("split(\"%s\", %v, %v)\n", esc(data[:60]), atEOF, tooLong)
 
     if atEOF && len(data) == 0 {
         return 0, nil, nil
     }
 
     if (tooLong) {
+        // so this is retry with tooLong flag enabled; we cannot request more data
+        // and there's no match of the pattern in data. So we return
         rsPos, rsSize := s.rsRevFinder(data)
         if rsPos < 0 {
             return 0, nil, errors.New("record is too long and didn't fit into a buffer")
@@ -110,7 +122,8 @@ func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advan
     if loc < 0 {
         return 0, nil, nil //request more data.
     }
-    debug("Split(): patFinder() loc=%d, size=%d, '%s'\n", loc, size, data[loc:loc+size])
+    s.found = true
+    debug("patFinder() loc=%d, size=%d, '%s'\n", loc, size, esc(data[loc:loc+size]))
     preLoc := 0
     preSize := 0
     if loc != 0 {
@@ -123,9 +136,12 @@ func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advan
     debug("rs='%s'\n", data[preLoc:preLoc+preSize])
 
     postLoc, postSize := s.rsFinder(data[loc+size:])
-    //debug(">>>%s<<<\n", data[loc+size:])
-    if (postLoc < 0){
-        return 0, nil, nil
+    if (postLoc < 0) {
+        if (atEOF) {
+            return len(data), data[preLoc:], nil
+        } else {
+            return 0, nil, nil //not enough data
+        }
     }
     debug("postLoc, postSize = %d, %d\n", postLoc, postSize)
     debug("post string: %s\n", data[loc+size+postLoc:loc+size+postLoc+postSize])
@@ -133,12 +149,13 @@ func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advan
     recBegin := preLoc+preSize
     recEnd   := loc+size+postLoc+postSize
     rec      := data[recBegin:recEnd]
-    debug("RETURN: %d, %s", recEnd, rec)
+    debug("RETURN: %d, %s\n", recEnd, esc(rec))
     return recEnd, rec, nil
 }
 
 
 func mlrgrep(pat string, rs string, r io.Reader) {
+    w := bufio.NewWriter(os.Stdout)
     scanner := NewScanner(r)
     splitter := NewPatternFirstFinder(pat, rs)
 
@@ -147,10 +164,10 @@ func mlrgrep(pat string, rs string, r io.Reader) {
     for scanner.Scan() {
         line := scanner.Bytes()
         if splitter.found {
-            //fmt.Fprint(os.Stdout, line)
-            fmt.Fprintf(os.Stdout, "OUT: %s", line)
+            w.Write(line)
         }
     }
+    w.Flush()
 }
 
 
@@ -171,7 +188,7 @@ func main() {
 
     var regex []string;
     var files []string;
-    defer fmt.Print("\033[0m") // defer resetting the terminal to default colors
+    //defer fmt.Print("\033[0m") // defer resetting the terminal to default colors
 
     debug("os.Args: %s\n", os.Args)
     debug("rs=%s\n", *rs)
