@@ -7,6 +7,7 @@ import (
     "bytes"
     "errors"
     "bufio"
+    "sync"
     //"regexp"
     "strings"
     goopt "github.com/droundy/goopt"
@@ -153,8 +154,77 @@ func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advan
     return recEnd, rec, nil
 }
 
+//////////////////////////////////////////////////////////////////////////////
+// Find-pattern-first algorithm
 
-func mlrgrep(pat string, rs string, r io.Reader) {
+type SplitRecordFirstFinder struct {
+    found bool;
+    patFinder func(data []byte) (int, int)
+    rsFinder func(data []byte) (int, int)
+}
+
+func NewSplitRecordFirstFinder(pat, rs string) *SplitRecordFirstFinder{
+    //compile regex and set MLRFinder fields
+    debug("rs=%s\n", rs)
+    s := new(SplitRecordFirstFinder)
+    s.patFinder = func(d []byte) (int, int) { return bytes.Index(d, []byte(pat)), len(pat) }
+    s.rsFinder  = func(d []byte) (int, int) { return bytes.Index(d, []byte(rs)), len(rs) }
+    return s
+}
+
+func (s *SplitRecordFirstFinder) Split(data []byte, atEOF bool) (advance int, token []byte, err error) {
+    if atEOF && len(data) == 0 {
+        return 0, nil, nil
+    }
+    pos, sz := s.rsFinder(data)
+    if (pos < 0) {
+        if (atEOF) {
+            return len(data), data, nil
+        } else {
+            return 0, nil, nil //not enough data
+        }
+    }
+    return pos+sz, data[0:pos+sz], nil
+}
+
+
+
+//////////////////////////////////////////////////////////////////////////////
+
+
+//Split Record First
+func grep_record(pat string, pipe chan string, wg* sync.WaitGroup) {
+    defer wg.Done()
+    for line := range pipe {
+        if (strings.Index(line, pat) > 0) {
+            fmt.Print(line)
+        }
+    }
+}
+
+
+func mlrgrep_srf(pat string, rs string, r io.Reader) {
+    var wg sync.WaitGroup
+    w := bufio.NewWriter(os.Stdout)
+    pipe := make(chan string)
+    scanner := bufio.NewScanner(r)
+    splitter := NewSplitRecordFirstFinder(pat, rs)
+
+    scanner.Split(splitter.Split)
+    wg.Add(1)
+    go grep_record(pat, pipe, &wg)
+
+    for scanner.Scan() {
+        line := scanner.Text()
+        pipe <- line
+    }
+    close(pipe)
+    wg.Wait()
+    w.Flush()
+}
+
+//Find Pattern First
+func mlrgrep_fpf(pat string, rs string, r io.Reader) {
     w := bufio.NewWriter(os.Stdout)
     scanner := NewScanner(r)
     splitter := NewPatternFirstFinder(pat, rs)
@@ -171,7 +241,6 @@ func mlrgrep(pat string, rs string, r io.Reader) {
 }
 
 
-//////////////////////////////////////////////////////////////////////////////
 
 func main() {
     goopt.Description = func() string {
@@ -221,6 +290,6 @@ func main() {
         file, e := os.Open(f)
         checkError(e)
         defer file.Close()
-        mlrgrep(regex[0], *rs, file)
+        mlrgrep_srf(regex[0], *rs, file)
     }
 }
