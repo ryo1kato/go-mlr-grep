@@ -8,9 +8,14 @@ import (
     "errors"
     "bufio"
     "sync"
-    //"regexp"
     "strings"
+    "unsafe"
+    "reflect"
     goopt "github.com/droundy/goopt"
+    //"regexp"
+    //sre2  "github.com/samthor/sre2"
+    pcre "github.com/gijsbers/go-pcre"
+    //rubex "github.com/moovweb/rubex"
 )
 var Usage = "gmlgrep [OPTIONS...] PATTERN[...] [--] [FILES...]"
 var Summary = `
@@ -42,8 +47,35 @@ const RS_REGEX = "^$|^(=====*|-----*)$"
 var rs = goopt.StringWithLabel([]string{"-r", "--rs"}, RS_REGEX, "RS_REGEX",
     fmt.Sprintf("Input record separator. default: /%s/", RS_REGEX))
 
+//const DATETIME_REGEX = ""
+
+
 //////////////////////////////////////////////////////////////////////////////
 //maxBufferSize = 1 * 1024 * 1024
+
+
+//////////////////////////////////////////////////////////////////////////////
+// regex wrapper
+
+type FindIndex func (d []byte) []int
+type Regexp struct {
+    //r *rubex.Regexp
+    r pcre.Regexp
+    FindIndex
+}
+
+
+func reComp(restr string) Regexp {
+    //nlchars := regexp.MustCompile("\\^|\\$")
+    //restr = nlchars.ReplaceAllString(restr, "\n")
+    //return regexp.MustCompile( restr )
+    //return regexp.MustCompile( "(?m)" + restr )
+    //r := rubex.MustCompile(restr)
+    //return Regexp{r, r.FindIndex}
+    r := pcre.MustCompile( restr, pcre.MULTILINE )
+    f := func (d []byte) []int { return r.FindIndex(d, 0) }
+    return Regexp{r, f}
+}
 
 
 
@@ -57,7 +89,7 @@ func checkError(e error) {
 }
 
 func debug(format string, args ...interface{}) {
-    fmt.Fprintf(os.Stderr, ">> DEBUG: " + format, args...)
+    //fmt.Fprintf(os.Stderr, ">> DEBUG: " + format, args...)
 }
 
 //escape newline for debug output.
@@ -101,7 +133,7 @@ func NewPatternFirstFinder(pat, rs string) *PatternFirstFinder{
 
 func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advance int, token []byte, err error) {
     s.found = false
-    debug("split(\"%s\", %v, %v)\n", esc(data[:60]), atEOF, tooLong)
+    //debug("split(\"%s\", %v, %v)\n", esc(data[:60]), atEOF, tooLong)
 
     if atEOF && len(data) == 0 {
         return 0, nil, nil
@@ -158,47 +190,112 @@ func (s *PatternFirstFinder) Split(data []byte, atEOF bool, tooLong bool) (advan
 // Find-pattern-first algorithm
 
 type SplitRecordFirstFinder struct {
-    found bool;
-    patFinder func(data []byte) (int, int)
+    found bool
+    rsSize int
+    rsPos int
     rsFinder func(data []byte) (int, int)
 }
 
+
+
+func regexFinder(restr string) (func (d []byte) (int, int)) {
+    re := reComp(restr)
+    return func(d []byte) (int, int) {
+        m := re.FindIndex(d)
+        if m != nil {
+            return m[0], (m[1] - m[0])
+        } else {
+            return -1, 0
+        }
+    }
+}
+
 func NewSplitRecordFirstFinder(pat, rs string) *SplitRecordFirstFinder{
-    //compile regex and set MLRFinder fields
-    debug("rs=%s\n", rs)
     s := new(SplitRecordFirstFinder)
-    s.patFinder = func(d []byte) (int, int) { return bytes.Index(d, []byte(pat)), len(pat) }
-    s.rsFinder  = func(d []byte) (int, int) { return bytes.Index(d, []byte(rs)), len(rs) }
+    s.rsFinder = regexFinder(rs)
+    //s.rsFinder = func(d []byte) (int, int) { return bytes.Index(d, []byte(rs)), len(rs) }
     return s
 }
 
 func (s *SplitRecordFirstFinder) Split(data []byte, atEOF bool) (advance int, token []byte, err error) {
+    s.rsPos = 0
     if atEOF && len(data) == 0 {
         return 0, nil, nil
     }
     pos, sz := s.rsFinder(data)
     if (pos < 0) {
         if (atEOF) {
+            s.rsPos = len(data)
             return len(data), data, nil
         } else {
             return 0, nil, nil //not enough data
         }
     }
-    return pos+sz, data[0:pos+sz], nil
+    if (pos+sz == 0) {
+        //FIXME: is this the best way to handle empty match?
+        // The only known case so far is when using /^$/ with (?m) flag
+        s.rsPos = 1
+        return 1, data[0:1], nil
+    } else {
+        s.rsPos = pos
+        return pos+sz, data[0:pos+sz], nil
+    }
 }
 
 
 
 //////////////////////////////////////////////////////////////////////////////
-
-
 //Split Record First
-func grep_record(pat string, pipe chan string, wg* sync.WaitGroup) {
+
+// records returned from the splitter is terminted with RS
+// for speed reason, but we want to have RS at the begining of
+// records (it makes sense if RS is a time stamp or other time
+// header info.
+type Record struct {
+    chunk string
+    rsPos int
+}
+
+func unsafeStrToByte(s string) []byte {
+    strHeader := (*reflect.StringHeader)(unsafe.Pointer(&s))
+
+    var b []byte
+    byteHeader := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+    byteHeader.Data = strHeader.Data
+
+    // need to take the length of s here to ensure s is live until after we update b's Data
+    // field since the garbage collector can collect a variable once it is no longer used
+    // not when it goes out of scope, for more details see https://github.com/golang/go/issues/9046
+    //l := len(s)
+    //byteHeader.Len = l
+    //byteHeader.Cap = l
+    return b
+}
+
+func grep_record(pat string, pipe chan Record, wg* sync.WaitGroup) {
     defer wg.Done()
-    for line := range pipe {
-        if (strings.Index(line, pat) > 0) {
-            fmt.Print(line)
+    var prevRS string
+    /*
+    // plain text
+    for rec := range pipe {
+        if strings.Index(rec.chunk, pat) > 0 {
+            fmt.Print(prevRS)
+            fmt.Print(rec.chunk[:rec.rsPos])
         }
+        prevRS = rec.chunk[rec.rsPos:]
+    }
+    */
+
+    //regex
+    re := reComp(pat)
+    for rec := range pipe {
+        //if ( re.FindIndex([]byte(rec.chunk)) != nil ) {
+        if ( re.FindIndex( unsafeStrToByte(rec.chunk) ) != nil ) {
+            fmt.Print(prevRS)
+            fmt.Print(rec.chunk[:rec.rsPos])
+        }
+        prevRS = rec.chunk[rec.rsPos:]
+        //fmt.Println(">>'" + prevRS + "'")
     }
 }
 
@@ -206,7 +303,7 @@ func grep_record(pat string, pipe chan string, wg* sync.WaitGroup) {
 func mlrgrep_srf(pat string, rs string, r io.Reader) {
     var wg sync.WaitGroup
     w := bufio.NewWriter(os.Stdout)
-    pipe := make(chan string)
+    pipe := make(chan Record, 128)
     scanner := bufio.NewScanner(r)
     splitter := NewSplitRecordFirstFinder(pat, rs)
 
@@ -215,8 +312,8 @@ func mlrgrep_srf(pat string, rs string, r io.Reader) {
     go grep_record(pat, pipe, &wg)
 
     for scanner.Scan() {
-        line := scanner.Text()
-        pipe <- line
+        rec := scanner.Text()
+        pipe <- Record{chunk: rec, rsPos: splitter.rsPos}
     }
     close(pipe)
     wg.Wait()
@@ -255,8 +352,8 @@ func main() {
     }
     goopt.Parse(nil)
 
-    var regex []string;
-    var files []string;
+    var regex []string
+    var files []string
     //defer fmt.Print("\033[0m") // defer resetting the terminal to default colors
 
     debug("os.Args: %s\n", os.Args)
@@ -270,8 +367,8 @@ func main() {
         }
         // if an argument is a filename for existing one,
         // assume that (and everything follows) as filename.
-        _, err := os.Stat(a)
-        if (err == nil) {
+        f, err := os.Stat(a)
+        if (err == nil && !f.IsDir() ) {
             break;
         }
         regex = append(regex, a)
@@ -279,17 +376,20 @@ func main() {
     }
 
     for _, a := range goopt.Args[i:] {
+        if (a == "--") {
+            regex = append(regex, files...)
+            files = nil
+        }
         files = append(files, a)
     }
     debug("regex: %s\n", regex)
     debug("files: %s\n", files)
 
-    //re := regexp.MustCompile(regex[0])
     for _, f := range files {
-        //fgrep(regex[0], f)
         file, e := os.Open(f)
         checkError(e)
         defer file.Close()
         mlrgrep_srf(regex[0], *rs, file)
+        //mlrgrep_fpf(regex[0], *rs, file)
     }
 }
